@@ -57,12 +57,11 @@ async fn main() -> Result<(), std::io::Error> {
                 _stream
                     .write_all(&msg.correlation_id.to_be_bytes())
                     .unwrap();
-                // _stream
-                //     .write_all(&msg.request_api_key.to_be_bytes())
-                //     .unwrap();
-                // _stream
-                //     .write_all(&msg.request_api_version.to_be_bytes())
-                //     .unwrap();
+                if msg.request_api_version != 4 {
+                    println!("Unsupported api version: {}", &msg.request_api_version);
+                    _stream.write_all([0, 35].as_slice()).unwrap();
+                } else {
+                }
             }
             Err(e) => {
                 println!("error: {}", e);
