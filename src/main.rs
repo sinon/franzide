@@ -3,6 +3,7 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
+use bytes::BufMut;
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug)]
@@ -84,25 +85,12 @@ async fn main() -> Result<(), std::io::Error> {
                 );
                 println!("RESP: {:?}", resp_msg);
 
-                let mut resp_len = msg.correlation_id.to_be_bytes().len() as u32;
-                // error_code u16
-                resp_len += msg.error_code.to_be_bytes().len() as u32;
+                let mut resp_data: Vec<u8> = Vec::new();
                 // Represents a sequence of objects of a given type T.
                 // Type T can be either a primitive type (e.g. STRING) or a structure.
                 // First, the length N is given as an INT32. Then N instances of type T follow.
                 // A null array is represented with a length of -1. In protocol documentation an array of T instances is referred to as [T].
-
-                // Length of [api_key]
-                resp_len += 3_u32.to_be_bytes().len() as u32;
-                // api_key - 18
-                resp_len += 18_u16.to_be_bytes().len() as u32;
-                // min_version 4+
-                resp_len += 4_u16.to_be_bytes().len() as u32;
-                resp_len += 4_u16.to_be_bytes().len() as u32;
-                // throttle_time_ms => INT32
-                resp_len += 0_u32.to_be_bytes().len() as u32;
-                println!("Response with msg len: {resp_len}");
-
+                //
                 /*
                 ApiVersions Response (Version: 4) => error_code [api_keys] throttle_time_ms TAG_BUFFER
                 error_code => INT16
@@ -112,21 +100,26 @@ async fn main() -> Result<(), std::io::Error> {
                   max_version => INT16
                 throttle_time_ms => INT32
                 */
+                if msg.request_api_key == 18 {
+                    resp_data.put_u32(resp_msg.correlation_id);
+                    resp_data.put_u16(resp_msg.error_code);
+                    resp_data.put_i8(2);
+                    resp_data.put_i16(18); // api key
+                    resp_data.put_i16(0); // min version: 0
+                    resp_data.put_i16(4); // max version: 4
+                    resp_data.put_i8(0); // size of tag buffer
+                    resp_data.put_i32(200); // throttle time ms
+                    resp_data.put_i8(0);
+                    println!("Request for ApiVersions");
+                } else {
+                    println!("Request for unknown API key");
+                }
 
-                _stream.write_all(&resp_len.to_be_bytes()).unwrap();
-                _stream
-                    .write_all(&msg.correlation_id.to_be_bytes())
-                    .unwrap();
-                println!("Error code: {}", &msg.error_code);
-                _stream
-                    .write_all(&resp_msg.error_code.to_be_bytes())
-                    .unwrap();
-                //
-                _stream.write_all(&3_u32.to_be_bytes()).unwrap();
-                _stream.write_all(&18_u16.to_be_bytes()).unwrap();
-                _stream.write_all(&4_u16.to_be_bytes()).unwrap();
-                _stream.write_all(&4_u16.to_be_bytes()).unwrap();
-                _stream.write_all(&0_u32.to_be_bytes()).unwrap();
+                let mut response = Vec::new();
+                response.put_i32(resp_data.len().try_into().unwrap());
+                response.put(&resp_data[..]);
+
+                _stream.write_all(&response).unwrap();
             }
             Err(e) => {
                 println!("error: {}", e);
