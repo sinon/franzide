@@ -3,6 +3,7 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
+use anyhow::Error;
 use bytes::BufMut;
 use tokio::io::AsyncReadExt;
 
@@ -55,76 +56,92 @@ impl Message {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), std::io::Error> {
-    println!("Logs from your program will appear here!");
+async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
+    // Read the message len from stream
+    let mut buf = [0_u8; 4];
+    stream
+        .read_exact(buf.as_mut_slice())
+        .expect("Expected a 4 bytes for msg len");
+    let mut reader = Cursor::new(buf);
+    let msg_len = reader
+        .read_u32()
+        .await
+        .expect("Expected that bytearray converts to u32");
 
-    let listener = TcpListener::bind("127.0.0.1:9092").unwrap();
+    let msg = Message::read_message(stream, msg_len).await;
+    println!("MSG: {:?}", msg);
+    Ok(msg)
+}
+
+async fn create_response(msg: &Message) -> Result<Vec<u8>, Error> {
+    let resp_msg = Message::create_api_versions_response(
+        msg.correlation_id,
+        msg.request_api_key,
+        msg.request_api_version,
+    );
+    println!("RESP: {:?}", resp_msg);
+
+    let mut resp_data: Vec<u8> = Vec::new();
+    // Represents a sequence of objects of a given type T.
+    // Type T can be either a primitive type (e.g. STRING) or a structure.
+    // First, the length N is given as an INT32. Then N instances of type T follow.
+    // A null array is represented with a length of -1. In protocol documentation an array of T instances is referred to as [T].
+    //
+    /*
+    ApiVersions Response (Version: 4) => error_code [api_keys] throttle_time_ms TAG_BUFFER
+    error_code => INT16
+    api_keys => api_key min_version max_version TAG_BUFFER
+      api_key => INT16
+      min_version => INT16
+      max_version => INT16
+    throttle_time_ms => INT32
+    */
+    if msg.request_api_key == 18 {
+        resp_data.put_u32(resp_msg.correlation_id);
+        resp_data.put_u16(resp_msg.error_code);
+        resp_data.put_i8(2);
+        resp_data.put_i16(18); // api key
+        resp_data.put_i16(0); // min version: 0
+        resp_data.put_i16(4); // max version: 4
+        resp_data.put_i8(0); // size of tag buffer
+        resp_data.put_i32(200); // throttle time ms
+        resp_data.put_i8(0);
+        println!("Request for ApiVersions");
+    } else {
+        println!("Request for unknown API key");
+    }
+
+    let mut response = Vec::new();
+    response.put_i32(
+        resp_data
+            .len()
+            .try_into()
+            .expect("len should convert to i32"),
+    );
+    response.put(&resp_data[..]);
+    Ok(response)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let listener = TcpListener::bind("127.0.0.1:9092").expect("Cannot connect to local port 9092");
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut _stream) => {
-                // Read the message len from stream
-                let mut buf = [0_u8; 4];
-                _stream
-                    .read_exact(buf.as_mut_slice())
-                    .expect("Expected a 4 bytes for msg len");
-                let mut rdr = Cursor::new(buf);
-                let msg_len = rdr
-                    .read_u32()
-                    .await
-                    .expect("Expected that bytearray converts to u32");
-
-                let msg = Message::read_message(&mut _stream, msg_len).await;
-                println!("MSG: {:?}", msg);
-
-                let resp_msg = Message::create_api_versions_response(
-                    msg.correlation_id,
-                    msg.request_api_key,
-                    msg.request_api_version,
-                );
-                println!("RESP: {:?}", resp_msg);
-
-                let mut resp_data: Vec<u8> = Vec::new();
-                // Represents a sequence of objects of a given type T.
-                // Type T can be either a primitive type (e.g. STRING) or a structure.
-                // First, the length N is given as an INT32. Then N instances of type T follow.
-                // A null array is represented with a length of -1. In protocol documentation an array of T instances is referred to as [T].
-                //
-                /*
-                ApiVersions Response (Version: 4) => error_code [api_keys] throttle_time_ms TAG_BUFFER
-                error_code => INT16
-                api_keys => api_key min_version max_version TAG_BUFFER
-                  api_key => INT16
-                  min_version => INT16
-                  max_version => INT16
-                throttle_time_ms => INT32
-                */
-                if msg.request_api_key == 18 {
-                    resp_data.put_u32(resp_msg.correlation_id);
-                    resp_data.put_u16(resp_msg.error_code);
-                    resp_data.put_i8(2);
-                    resp_data.put_i16(18); // api key
-                    resp_data.put_i16(0); // min version: 0
-                    resp_data.put_i16(4); // max version: 4
-                    resp_data.put_i8(0); // size of tag buffer
-                    resp_data.put_i32(200); // throttle time ms
-                    resp_data.put_i8(0);
-                    println!("Request for ApiVersions");
-                } else {
-                    println!("Request for unknown API key");
+                while let Ok(req_msg) = parse_request(&mut _stream).await {
+                    let resp = create_response(&req_msg).await?;
+                    match _stream.write_all(&resp) {
+                        Ok(_) => println!("Successfully wrote response"),
+                        Err(e) => eprintln!("error: {e}"),
+                    }
                 }
-
-                let mut response = Vec::new();
-                response.put_i32(resp_data.len().try_into().unwrap());
-                response.put(&resp_data[..]);
-
-                _stream.write_all(&response).unwrap();
             }
             Err(e) => {
-                println!("error: {}", e);
+                println!("error accepting incoming on listener: {}", e);
             }
         }
     }
+    println!("listener has no more incoming, exiting");
     Ok(())
 }
