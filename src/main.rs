@@ -1,11 +1,11 @@
-use std::{
-    io::{Cursor, Read, Write},
-    net::{TcpListener, TcpStream},
-};
+use std::io::Cursor;
 
 use anyhow::Error;
 use bytes::BufMut;
-use tokio::io::AsyncReadExt;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
 #[derive(Debug)]
 struct Message {
@@ -24,13 +24,13 @@ impl Message {
 
         // Read the message using the previous len
         let mut msg_buf = vec![0u8; len as usize];
-        stream.read_exact(msg_buf.as_mut_slice()).unwrap();
+        stream.read_exact(msg_buf.as_mut_slice()).await.unwrap();
         let mut rdr = Cursor::new(msg_buf);
         let request_api_key = rdr.read_u16().await.unwrap();
         let request_api_version = rdr.read_u16().await.unwrap();
         let correlation_id = rdr.read_u32().await.unwrap();
 
-        Message {
+        Self {
             request_api_key,
             request_api_version,
             correlation_id,
@@ -38,7 +38,7 @@ impl Message {
         }
     }
 
-    fn create_api_versions_response(
+    const fn create_api_versions_response(
         correlation_id: u32,
         request_api_key: u16,
         request_api_version: u16,
@@ -47,11 +47,11 @@ impl Message {
             4..=18 => 0,
             _ => 35,
         };
-        Message {
-            correlation_id,
-            error_code,
+        Self {
             request_api_key,
             request_api_version,
+            correlation_id,
+            error_code,
         }
     }
 }
@@ -61,6 +61,7 @@ async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
     let mut buf = [0_u8; 4];
     stream
         .read_exact(buf.as_mut_slice())
+        .await
         .expect("Expected a 4 bytes for msg len");
     let mut reader = Cursor::new(buf);
     let msg_len = reader
@@ -69,17 +70,17 @@ async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
         .expect("Expected that bytearray converts to u32");
 
     let msg = Message::read_message(stream, msg_len).await;
-    println!("MSG: {:?}", msg);
+    println!("MSG: {msg:?}");
     Ok(msg)
 }
 
-async fn create_response(msg: &Message) -> Result<Vec<u8>, Error> {
+fn create_response(msg: &Message) -> Vec<u8> {
     let resp_msg = Message::create_api_versions_response(
         msg.correlation_id,
         msg.request_api_key,
         msg.request_api_version,
     );
-    println!("RESP: {:?}", resp_msg);
+    println!("RESP: {resp_msg:?}");
 
     let mut resp_data: Vec<u8> = Vec::new();
     // Represents a sequence of objects of a given type T.
@@ -119,29 +120,26 @@ async fn create_response(msg: &Message) -> Result<Vec<u8>, Error> {
             .expect("len should convert to i32"),
     );
     response.put(&resp_data[..]);
-    Ok(response)
+    response
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let listener = TcpListener::bind("127.0.0.1:9092").expect("Cannot connect to local port 9092");
+    let listener = TcpListener::bind("127.0.0.1:9092")
+        .await
+        .expect("Cannot connect to local port 9092");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut _stream) => {
-                while let Ok(req_msg) = parse_request(&mut _stream).await {
-                    let resp = create_response(&req_msg).await?;
-                    match _stream.write_all(&resp) {
-                        Ok(_) => println!("Successfully wrote response"),
-                        Err(e) => eprintln!("error: {e}"),
-                    }
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+
+        tokio::spawn(async move {
+            while let Ok(req_msg) = parse_request(&mut socket).await {
+                let resp = create_response(&req_msg);
+                match socket.write_all(&resp).await {
+                    Ok(()) => println!("Successfully wrote response"),
+                    Err(e) => eprintln!("error: {e}"),
                 }
             }
-            Err(e) => {
-                println!("error accepting incoming on listener: {}", e);
-            }
-        }
+        });
     }
-    println!("listener has no more incoming, exiting");
-    Ok(())
 }
