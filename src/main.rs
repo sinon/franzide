@@ -16,7 +16,7 @@ struct Message {
 }
 
 impl Message {
-    async fn read_message(stream: &mut TcpStream, len: u32) -> Self {
+    async fn read_message(stream: &mut TcpStream, len: u32) -> Result<Self, Error> {
         /*Request Header v0 => request_api_key request_api_version correlation_id
         request_api_key => INT16
         request_api_version => INT16
@@ -24,18 +24,18 @@ impl Message {
 
         // Read the message using the previous len
         let mut msg_buf = vec![0u8; len as usize];
-        stream.read_exact(msg_buf.as_mut_slice()).await.unwrap();
+        stream.read_exact(msg_buf.as_mut_slice()).await?;
         let mut rdr = Cursor::new(msg_buf);
-        let request_api_key = rdr.read_u16().await.unwrap();
-        let request_api_version = rdr.read_u16().await.unwrap();
-        let correlation_id = rdr.read_u32().await.unwrap();
+        let request_api_key = rdr.read_u16().await?;
+        let request_api_version = rdr.read_u16().await?;
+        let correlation_id = rdr.read_u32().await?;
 
-        Self {
+        Ok(Self {
             request_api_key,
             request_api_version,
             correlation_id,
             error_code: 0,
-        }
+        })
     }
 
     const fn create_api_versions_response(
@@ -69,7 +69,7 @@ async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
         .await
         .expect("Expected that bytearray converts to u32");
 
-    let msg = Message::read_message(stream, msg_len).await;
+    let msg = Message::read_message(stream, msg_len).await?;
     println!("MSG: {msg:?}");
     Ok(msg)
 }
