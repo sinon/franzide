@@ -8,15 +8,98 @@ use tokio::{
 };
 
 #[derive(Debug)]
-struct Message {
+struct MessageRequestHeader {
+    /// Request Header v0 => request_api_key request_api_version correlation_id
+    /// request_api_key => INT16
+    /// request_api_version => INT16
+    /// correlation_id => INT32
     request_api_key: u16,
     request_api_version: u16,
     correlation_id: u32,
-    error_code: u16,
 }
 
-impl Message {
-    async fn read_message(stream: &mut TcpStream, len: u32) -> Result<Self, Error> {
+#[derive(Debug)]
+struct MessageResponseHeader {
+    /// Response Header v1 => correlation_id TAG_BUFFER
+    ///  correlation_id => INT32
+    correlation_id: u32,
+}
+
+#[derive(Debug)]
+struct ApiKey {
+    key: u16,
+    min_version: u16,
+    max_version: u16,
+}
+
+#[derive(Debug)]
+struct ApiVersionsResponse {
+    correlation_id: u32,
+    error_code: u16,
+    api_keys: Vec<ApiKey>,
+    throttle_time_ms: i32,
+}
+
+#[derive(Debug)]
+struct TopicPartition {
+    error_code: u16,
+    partition_index: u32,
+    leader_id: u32,
+    leader_epoch: u32,
+    replica_nodes: u32,
+    isr_nodes: u32,
+    eligible_leader_replicas: u32,
+    last_known_elr: u32,
+}
+
+#[derive(Debug)]
+struct Topic {
+    error_code: u16,
+    name: String,
+    // topic_id: uuid,
+    is_internal: bool,
+    partitions: Vec<TopicPartition>,
+    topic_authorized_operations: u32,
+}
+
+#[derive(Debug)]
+struct DescribeTopicPartitionsResponse {
+    correlation_id: u32,
+    topics: Vec<Topic>,
+    throttle_time_ms: i32,
+    // next_cursor: u32,
+}
+
+struct MessageType {
+    api_key: u16,
+    min_version: u16,
+    max_version: u16,
+}
+
+mod supported_messages {
+    use super::MessageType;
+    pub const API_VERSIONS: MessageType = MessageType {
+        api_key: 18,
+        min_version: 0,
+        max_version: 4,
+    };
+    pub const DESCRIBE_TOPIC_PARTITIONS: MessageType = MessageType {
+        api_key: 75,
+        min_version: 0,
+        max_version: 0,
+    };
+}
+
+struct KafkaCursor {}
+
+struct DescribeTopicPartitionsRequestBody {
+    topics: Vec<Topic>,
+    response_partition_limit: u32,
+    cursor: Vec<KafkaCursor>,
+}
+
+impl MessageRequestHeader {
+    async fn read_message_header(stream: &mut TcpStream, len: u32) -> Result<Self, Error> {
         /*Request Header v0 => request_api_key request_api_version correlation_id
         request_api_key => INT16
         request_api_version => INT16
@@ -34,29 +117,82 @@ impl Message {
             request_api_key,
             request_api_version,
             correlation_id,
-            error_code: 0,
         })
-    }
-
-    const fn create_api_versions_response(
-        correlation_id: u32,
-        request_api_key: u16,
-        request_api_version: u16,
-    ) -> Self {
-        let error_code = match request_api_version {
-            4..=18 => 0,
-            _ => 35,
-        };
-        Self {
-            request_api_key,
-            request_api_version,
-            correlation_id,
-            error_code,
-        }
     }
 }
 
-async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
+impl ApiKey {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.put_i16(self.key as i16);
+        buf.put_i16(self.min_version as i16);
+        buf.put_i16(self.max_version as i16);
+        buf.put_i8(0); // TAG_BUFFER
+    }
+}
+
+impl ApiVersionsResponse {
+    fn new(correlation_id: u32, error_code: u16) -> Self {
+        let api_keys = vec![
+            ApiKey {
+                key: supported_messages::API_VERSIONS.api_key,
+                min_version: supported_messages::API_VERSIONS.min_version,
+                max_version: supported_messages::API_VERSIONS.max_version,
+            },
+            ApiKey {
+                key: supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key,
+                min_version: supported_messages::DESCRIBE_TOPIC_PARTITIONS.min_version,
+                max_version: supported_messages::DESCRIBE_TOPIC_PARTITIONS.max_version,
+            },
+        ];
+
+        Self {
+            correlation_id,
+            error_code,
+            api_keys,
+            throttle_time_ms: 200,
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        buf.put_u32(self.correlation_id);
+        buf.put_u16(self.error_code);
+        buf.put_i8(self.api_keys.len() as i8);
+
+        for api_key in &self.api_keys {
+            api_key.serialize(&mut buf);
+        }
+
+        buf.put_i32(self.throttle_time_ms);
+        buf.put_i8(0); // TAG_BUFFER
+        buf
+    }
+}
+
+impl DescribeTopicPartitionsResponse {
+    fn new(correlation_id: u32) -> Self {
+        Self {
+            correlation_id,
+            throttle_time_ms: 200,
+            topics: vec![],
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        buf.put_u32(self.correlation_id);
+        buf.put_i8(self.topics.len() as i8);
+
+        buf.put_i32(self.throttle_time_ms);
+        buf.put_i8(0); // TAG_BUFFER
+
+        buf
+    }
+}
+
+async fn parse_request(stream: &mut TcpStream) -> Result<MessageRequestHeader, Error> {
     // Read the message len from stream
     let mut buf = [0_u8; 4];
     stream
@@ -69,52 +205,33 @@ async fn parse_request(stream: &mut TcpStream) -> Result<Message, Error> {
         .await
         .expect("Expected that bytearray converts to u32");
 
-    let msg = Message::read_message(stream, msg_len).await?;
+    let msg = MessageRequestHeader::read_message_header(stream, msg_len).await?;
     println!("MSG: {msg:?}");
     Ok(msg)
 }
 
-fn create_response(msg: &Message) -> Vec<u8> {
-    let resp_msg = Message::create_api_versions_response(
-        msg.correlation_id,
-        msg.request_api_key,
-        msg.request_api_version,
-    );
-    println!("RESP: {resp_msg:?}");
+fn create_response(msg: &MessageRequestHeader) -> Vec<u8> {
+    let error_code = match msg.request_api_version {
+        4..=18 => 0,
+        _ => 35,
+    };
 
-    let mut resp_data: Vec<u8> = Vec::new();
-    // Represents a sequence of objects of a given type T.
-    // Type T can be either a primitive type (e.g. STRING) or a structure.
-    // First, the length N is given as an INT32. Then N instances of type T follow.
-    // A null array is represented with a length of -1. In protocol documentation an array of T instances is referred to as [T].
-    //
-    /*
-    ApiVersions Response (Version: 4) => error_code [api_keys] throttle_time_ms TAG_BUFFER
-    error_code => INT16
-    api_keys => api_key min_version max_version TAG_BUFFER
-      api_key => INT16
-      min_version => INT16
-      max_version => INT16
-    throttle_time_ms => INT32
-    */
-    if msg.request_api_key == 18 {
-        resp_data.put_u32(resp_msg.correlation_id);
-        resp_data.put_u16(resp_msg.error_code);
-        resp_data.put_i8(3); // Num of api keys
-        resp_data.put_i16(18); // api key: ApiVersions
-        resp_data.put_i16(0); // min version: 0
-        resp_data.put_i16(4); // max version: 4
-        resp_data.put_i8(0); // .TAG_BUFFER
-        resp_data.put_i16(75); // api key: DescribeTopicPartitions
-        resp_data.put_i16(0); // min version: 0
-        resp_data.put_i16(0); // max version: 0
-        resp_data.put_i8(0); // .TAG_BUFFER
-        resp_data.put_i32(200); // throttle time ms
-        resp_data.put_i8(0); //.TAG_BUFFER
-        println!("Request for ApiVersions");
+    let resp_data = if msg.request_api_key == supported_messages::API_VERSIONS.api_key {
+        let api_versions_response = ApiVersionsResponse::new(msg.correlation_id, error_code);
+        println!("Request for ApiVersions: {:?}", api_versions_response);
+        api_versions_response.serialize()
+    } else if msg.request_api_key == supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key {
+        let describe_topic_partitions_response =
+            DescribeTopicPartitionsResponse::new(msg.correlation_id);
+        println!(
+            "Request for DescribeTopicPartitions: {:?}",
+            describe_topic_partitions_response
+        );
+        describe_topic_partitions_response.serialize()
     } else {
         println!("Request for unknown API key");
-    }
+        Vec::new()
+    };
 
     let mut response = Vec::new();
     response.put_i32(
