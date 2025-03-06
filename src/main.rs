@@ -100,13 +100,17 @@ fn create_response(msg: &Message) -> Vec<u8> {
     if msg.request_api_key == 18 {
         resp_data.put_u32(resp_msg.correlation_id);
         resp_data.put_u16(resp_msg.error_code);
-        resp_data.put_i8(2);
-        resp_data.put_i16(18); // api key
+        resp_data.put_i8(3); // Num of api keys
+        resp_data.put_i16(18); // api key: ApiVersions
         resp_data.put_i16(0); // min version: 0
         resp_data.put_i16(4); // max version: 4
-        resp_data.put_i8(0); // size of tag buffer
+        resp_data.put_i8(0); // .TAG_BUFFER
+        resp_data.put_i16(75); // api key: DescribeTopicPartitions
+        resp_data.put_i16(0); // min version: 0
+        resp_data.put_i16(0); // max version: 0
+        resp_data.put_i8(0); // .TAG_BUFFER
         resp_data.put_i32(200); // throttle time ms
-        resp_data.put_i8(0);
+        resp_data.put_i8(0); //.TAG_BUFFER
         println!("Request for ApiVersions");
     } else {
         println!("Request for unknown API key");
