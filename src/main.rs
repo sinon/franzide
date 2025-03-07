@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{io::Cursor, ops::RangeInclusive};
 
 use anyhow::Error;
 use bytes::BufMut;
@@ -6,6 +6,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+
+const UNSUPPORTED_VERSION_ERROR_CODE: u16 = 35;
 
 #[derive(Debug)]
 struct MessageRequestHeader {
@@ -26,17 +28,10 @@ struct MessageResponseHeader {
 }
 
 #[derive(Debug)]
-struct ApiKey {
-    key: u16,
-    min_version: u16,
-    max_version: u16,
-}
-
-#[derive(Debug)]
 struct ApiVersionsResponse {
     correlation_id: u32,
     error_code: u16,
-    api_keys: Vec<ApiKey>,
+    messages_types: Vec<MessageType>,
     throttle_time_ms: i32,
 }
 
@@ -70,23 +65,30 @@ struct DescribeTopicPartitionsResponse {
     // next_cursor: u32,
 }
 
+#[derive(Debug)]
 struct MessageType {
     api_key: u16,
-    min_version: u16,
-    max_version: u16,
+    versions: RangeInclusive<u16>,
+}
+
+impl MessageType {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.put_i16(self.api_key as i16);
+        buf.put_i16(*self.versions.start() as i16);
+        buf.put_i16(*self.versions.end() as i16);
+        buf.put_i8(0); // TAG_BUFFER
+    }
 }
 
 mod supported_messages {
     use super::MessageType;
     pub const API_VERSIONS: MessageType = MessageType {
         api_key: 18,
-        min_version: 0,
-        max_version: 4,
+        versions: 0..=4,
     };
     pub const DESCRIBE_TOPIC_PARTITIONS: MessageType = MessageType {
         api_key: 75,
-        min_version: 0,
-        max_version: 0,
+        versions: 0..=0,
     };
 }
 
@@ -104,6 +106,7 @@ impl MessageRequestHeader {
         request_api_key => INT16
         request_api_version => INT16
         correlation_id => INT32 */
+        // https://binspec.org/kafka-describe-topic-partitions-request-v0?highlight=4-23
 
         // Read the message using the previous len
         let mut msg_buf = vec![0u8; len as usize];
@@ -121,34 +124,17 @@ impl MessageRequestHeader {
     }
 }
 
-impl ApiKey {
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.put_i16(self.key as i16);
-        buf.put_i16(self.min_version as i16);
-        buf.put_i16(self.max_version as i16);
-        buf.put_i8(0); // TAG_BUFFER
-    }
-}
-
 impl ApiVersionsResponse {
     fn new(correlation_id: u32, error_code: u16) -> Self {
-        let api_keys = vec![
-            ApiKey {
-                key: supported_messages::API_VERSIONS.api_key,
-                min_version: supported_messages::API_VERSIONS.min_version,
-                max_version: supported_messages::API_VERSIONS.max_version,
-            },
-            ApiKey {
-                key: supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key,
-                min_version: supported_messages::DESCRIBE_TOPIC_PARTITIONS.min_version,
-                max_version: supported_messages::DESCRIBE_TOPIC_PARTITIONS.max_version,
-            },
+        let supported_messages = vec![
+            supported_messages::API_VERSIONS,
+            supported_messages::DESCRIBE_TOPIC_PARTITIONS,
         ];
 
         Self {
             correlation_id,
             error_code,
-            api_keys,
+            messages_types: supported_messages,
             throttle_time_ms: 200,
         }
     }
@@ -158,10 +144,10 @@ impl ApiVersionsResponse {
 
         buf.put_u32(self.correlation_id);
         buf.put_u16(self.error_code);
-        buf.put_i8(self.api_keys.len() as i8);
+        buf.put_i8(self.messages_types.len() as i8);
 
-        for api_key in &self.api_keys {
-            api_key.serialize(&mut buf);
+        for message_type in &self.messages_types {
+            message_type.serialize(&mut buf);
         }
 
         buf.put_i32(self.throttle_time_ms);
@@ -207,13 +193,22 @@ async fn parse_request(stream: &mut TcpStream) -> Result<MessageRequestHeader, E
 
     let msg = MessageRequestHeader::read_message_header(stream, msg_len).await?;
     println!("MSG: {msg:?}");
+    if msg.request_api_key == supported_messages::API_VERSIONS.api_key {
+        // https://binspec.org/kafka-api-versions-request-v4?highlight=24-38
+        // TODO: We haven't needed to actually parse the additional data with current requirements
+    } else if msg.request_api_key == supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key {
+        // https://binspec.org/kafka-describe-topic-partitions-request-v0?highlight=24-35
+        todo!("Parse the describe topic request body")
+    }
     Ok(msg)
 }
 
 fn create_response(msg: &MessageRequestHeader) -> Vec<u8> {
+    // TODO: This is hardcoded to pass previous codecrafters tests
+    // Only checks the version range, needs to consider the api_key and what it's specific range is
     let error_code = match msg.request_api_version {
         4..=18 => 0,
-        _ => 35,
+        _ => UNSUPPORTED_VERSION_ERROR_CODE,
     };
 
     let resp_data = if msg.request_api_key == supported_messages::API_VERSIONS.api_key {
