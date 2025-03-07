@@ -191,16 +191,58 @@ async fn parse_request(stream: &mut TcpStream) -> Result<MessageRequestHeader, E
         .await
         .expect("Expected that bytearray converts to u32");
 
-    let msg = MessageRequestHeader::read_message_header(stream, msg_len).await?;
-    println!("MSG: {msg:?}");
-    if msg.request_api_key == supported_messages::API_VERSIONS.api_key {
+    let msg_header = MessageRequestHeader::read_message_header(stream, msg_len).await?;
+    println!("MSG: {msg_header:?}");
+    if msg_header.request_api_key == supported_messages::API_VERSIONS.api_key {
         // https://binspec.org/kafka-api-versions-request-v4?highlight=24-38
         // TODO: We haven't needed to actually parse the additional data with current requirements
-    } else if msg.request_api_key == supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key {
+        println!("Request for ApiVersions, no body needs to be parsed");
+    } else if msg_header.request_api_key == supported_messages::DESCRIBE_TOPIC_PARTITIONS.api_key {
         // https://binspec.org/kafka-describe-topic-partitions-request-v0?highlight=24-35
-        todo!("Parse the describe topic request body")
+        println!("Request for DescribeTopicPartitions, parsing body");
+        let mut topics_buf = [0_u8; 4];
+        /// ??? Timing out here when running the test harness
+        stream.read_exact(topics_buf.as_mut_slice()).await?;
+        println!("Topics buffer: {topics_buf:?}");
+        let mut rdr = Cursor::new(topics_buf);
+        let topics_len = rdr.read_u32().await?;
+        println!("Topics length: {topics_len}");
+        let mut topics = Vec::new();
+        for _ in 0..topics_len {
+            let mut topic_name_len_buf = [0_u8; 2];
+            stream
+                .read_exact(&mut topic_name_len_buf)
+                .await
+                .expect("Expected 2 bytes for topic name length");
+            let mut reader = Cursor::new(topic_name_len_buf);
+            let topic_name_len = reader
+                .read_i16()
+                .await
+                .expect("Expected topic name length as i16");
+            println!("Topic name length: {topic_name_len}");
+            let mut topic_name_buf = vec![0_u8; topic_name_len as usize];
+            stream
+                .read_exact(&mut topic_name_buf)
+                .await
+                .expect("Expected topic name bytes");
+            let topic_name =
+                String::from_utf8(topic_name_buf).expect("Expected valid UTF-8 for topic name");
+            topics.push(Topic {
+                error_code: 0,
+                name: topic_name,
+                is_internal: false,
+                partitions: vec![],
+                topic_authorized_operations: 0,
+            });
+        }
+        let _body = DescribeTopicPartitionsRequestBody {
+            topics,
+            response_partition_limit: 0,
+            cursor: vec![],
+        };
+        // TODO: Re-work the return type to return the header and something that implements a Body trait?
     }
-    Ok(msg)
+    Ok(msg_header)
 }
 
 fn create_response(msg: &MessageRequestHeader) -> Vec<u8> {
